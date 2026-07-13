@@ -2,7 +2,8 @@ name: ins_navier_stokes_grid
 version: "0.1.0"
 description: >
   Julia finite-difference solver with spectral pressure projection and RK4 time integration;
-  CPU-only. Differentiates through the time loop via Zygote.jl reverse-mode AD.
+  runs on an NVIDIA GPU via CUDA.jl when one is visible (CPU fallback otherwise).
+  Differentiates through the time loop via Zygote.jl reverse-mode AD.
 build_config:
   custom_build_steps:
     - "RUN apt-get update -qq && apt-get install -y -q --no-install-recommends wget ca-certificates gcc g++ && rm -rf /var/lib/apt/lists/*"
@@ -12,7 +13,15 @@ build_config:
     # one container across many calls, so a one-time JIT cost on first call
     # is a net win over paying the sysimage build cost every push. Removed
     # PackageCompiler from the package list — it's no longer imported.
-    - 'RUN mkdir -p /app/julia_env /app/julia_depot && julia --project=/app/julia_env -e ''using Pkg; Pkg.add([Pkg.PackageSpec(name="IncompressibleNavierStokes", version="5.0.0"), Pkg.PackageSpec(name="Zygote", version="0.7.10")]); Pkg.precompile()'''
+    - 'RUN mkdir -p /app/julia_env /app/julia_depot && julia --project=/app/julia_env -e ''using Pkg; Pkg.add([Pkg.PackageSpec(name="IncompressibleNavierStokes", version="5.0.0"), Pkg.PackageSpec(name="Zygote", version="0.7.10"), Pkg.PackageSpec(name="CUDA", version="6.2.1")]); Pkg.precompile()'''
+    # No GPU is visible while the image builds, so CUDA.jl cannot pick a
+    # runtime by itself: pin the CUDA 12.9 runtime artifact (runs on any
+    # CUDA-12 driver via minor-version compatibility) and download +
+    # precompile it now rather than on first use inside the benchmark
+    # container. set_runtime_version! takes effect in a fresh process,
+    # hence the two separate steps.
+    - 'RUN julia --project=/app/julia_env -e ''using CUDA; CUDA.set_runtime_version!(v"12.9")'''
+    - 'RUN julia --project=/app/julia_env -e ''using CUDA; CUDA.precompile_runtime()'''
     - "RUN chmod -R 777 /app"
 env:
   JULIA_PROJECT: "/app/julia_env"
@@ -31,6 +40,6 @@ metadata:
     numerics: "Projection, RK4"
     ad_strategy: autodiff
     differentiable: true
-    uses_gpu: false
+    uses_gpu: true
     internal_dtype: float32
     doc_url: "https://agdestein.github.io/IncompressibleNavierStokes.jl/dev/"

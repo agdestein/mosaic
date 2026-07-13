@@ -1,5 +1,27 @@
 using IncompressibleNavierStokes
 using Zygote
+using CUDA
+
+# ---------------------------------------------------------------------------
+# Compute device
+#
+# GPU when a CUDA device is visible and functional (the benchmark runner
+# passes --gpus to the container), CPU otherwise — the same image works on
+# both. INS.jl's kernels are KernelAbstractions.jl, so the whole periodic
+# path (RK stages, CUFFT pressure solve, and the adjoint kernels behind the
+# Zygote rrules) runs on the device; arrays cross the host/device boundary
+# once per API call. The channel/obstacle paths (excluded from all
+# experiments) stay on the CPU.
+# ---------------------------------------------------------------------------
+
+const USE_GPU = CUDA.functional()
+const BACKEND = USE_GPU ? CUDABackend() : IncompressibleNavierStokes.CPU()
+
+"Move an array to the compute device (no-op without a GPU)."
+to_device(x::AbstractArray) = USE_GPU ? CuArray(x) : x
+
+"Move an array to host memory (no-op without a GPU)."
+to_host(x::AbstractArray) = USE_GPU ? Array(x) : x
 
 # ---------------------------------------------------------------------------
 # Setup cache (indexed by (n, L, ndim))
@@ -30,6 +52,7 @@ function get_setup_and_psolver(n::Int, L::Float64, ndim::Int)
                         (PeriodicBC(), PeriodicBC()),
                     ),
                 ),
+                backend = BACKEND,
             )
         else
             setup = Setup(;
@@ -41,6 +64,7 @@ function get_setup_and_psolver(n::Int, L::Float64, ndim::Int)
                         (PeriodicBC(), PeriodicBC()),
                     ),
                 ),
+                backend = BACKEND,
             )
         end
         psolver = psolver_spectral(setup)
@@ -210,7 +234,7 @@ round-off.
 """
 function ns_apply(v0_np, nu::Float64, dt::Float64, steps::Int, n::Int, L::Float64)
     T = Float32
-    v0   = T.(v0_np)
+    v0   = to_device(T.(v0_np))
     ndim = size(v0, ndims(v0))  # last dim: 2 or 3
     setup, psolver = get_setup_and_psolver(n, L, ndim)
 
@@ -237,7 +261,7 @@ function ns_apply(v0_np, nu::Float64, dt::Float64, steps::Int, n::Int, L::Float6
     else
         stag_to_coloc_3d(strip_ghosts_3d(state.u, n), n)
     end
-    return T.(v_out)
+    return T.(to_host(v_out))
 end
 
 """
@@ -254,8 +278,8 @@ two extra forward rollouts per VJP call) that earlier versions required.
 """
 function ns_vjp(v0_np, cotangent_np, nu::Float64, dt::Float64,
                 steps::Int, n::Int, L::Float64)
-    v0   = Float32.(v0_np)
-    cot  = Float32.(cotangent_np)
+    v0   = to_device(Float32.(v0_np))
+    cot  = to_device(Float32.(cotangent_np))
     ndim = size(v0, ndims(v0))
 
     setup, psolver = get_setup_and_psolver(n, L, ndim)
@@ -269,7 +293,7 @@ function ns_vjp(v0_np, cotangent_np, nu::Float64, dt::Float64,
 
     _, back = Zygote.pullback(fwd, v0, Float32(dt), Float32(nu))
     grads = back(cot)
-    grad_v0  = Float32.(grads[1])
+    grad_v0  = Float32.(to_host(grads[1]))
     grad_dt  = Float64(something(grads[2], 0.0))
     grad_nu  = Float64(something(grads[3], 0.0))
 
